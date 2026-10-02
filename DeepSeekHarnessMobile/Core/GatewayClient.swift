@@ -717,9 +717,7 @@ final class GatewayClient: ObservableObject {
                     // [LOCAL-DIAG] 解码失败是「服务端 query ok 但客户端报超时」最可能的成因，
                     // 而它**不会**断连接、此前也**不留任何痕迹**。这里把 kind/字节数/
                     // 错误摘要/孤立代理对出现次数记下来 —— 后者是上游 issue #29 / #14 的已知诱因。
-                    Self.emitDiag(
-                        "frame decode-failed channel=\(self.channel, privacy: .public) bytes=\(data.count) loneSurrogates=\(data.loneSurrogateCount, privacy: .public) error=\(GatewayWireDecoder.failureDescription(error), privacy: .public)"
-                        .trimCharacters(in: .whitespacesAndNewlines))
+                    Self.emitDiag("frame decode-failed channel=\(self.channel) bytes=\(data.count) loneSurrogates=\(data.loneSurrogateCount) error=\(GatewayWireDecoder.failureDescription(error))")
                     onFrame?(GatewayFrame(kind: "error", code: "decode-failed", message: GatewayWireDecoder.failureDescription(error)))
                 }
             }
@@ -728,9 +726,7 @@ final class GatewayClient: ObservableObject {
         } catch {
             // [LOCAL-DIAG] 传输层断开：这条路径此前只把 error 交给 handleFailure，
             // 不留痕迹。网关侧只能看到 code=1006 且无 close frame，无法判断是谁先动的。
-            Self.emitDiag(
-                "transport failed channel=\(self.channel, privacy: .public) state=\(String(describing: self.state), privacy: .public) error=\(error.localizedDescription, privacy: .public)"
-                .trimCharacters(in: .whitespacesAndNewlines))
+            Self.emitDiag("transport failed channel=\(self.channel) state=\(String(describing: self.state)) error=\(error.localizedDescription)")
             handleFailure(error, socket: socket)
         }
     }
@@ -891,9 +887,7 @@ final class GatewayClient: ObservableObject {
                         // 策略与服务端 keepalive 一致：容忍连续失败 N 次再判定链路死亡。
                         self.consecutivePingFailures += 1
                         guard self.consecutivePingFailures >= Self.PING_FAILURE_LIMIT else {
-                            Self.emitDiag(
-                                "ping failed \(self.consecutivePingFailures)/\(Self.PING_FAILURE_LIMIT) channel=\(self.channel, privacy: .public) error=\(error.localizedDescription, privacy: .public)"
-                                .trimCharacters(in: .whitespacesAndNewlines))
+                            Self.emitDiag("ping failed \(self.consecutivePingFailures)/\(Self.PING_FAILURE_LIMIT) channel=\(self.channel) error=\(error.localizedDescription)")
                             return
                         }
                         self.consecutivePingFailures = 0
