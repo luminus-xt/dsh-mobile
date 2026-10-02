@@ -269,6 +269,17 @@ final class GatewayClient: ObservableObject {
 
     func ping() { send(["type": "ping"]) }
 
+    /// [LOCAL-DIAG] 把诊断推给服务端，由网关记进它自己的日志。
+    /// 为什么走网络而不让用户导出：客户端 os_log 要连 Mac 才读得到（构建方没有 Mac），
+    /// 而当前故障形态恰恰是「写路径通、读路径不通」—— 用户的消息能到达服务端，
+    /// 查询应答却收不到 ⇒ 推送这条链正好可用，且用户无需任何手工操作。
+    func reportDiagnostic(_ text: String) {
+        send(["type": "client-log", "text": text])
+    }
+
+    /// [LOCAL-DIAG] 当前通道标识，供导出日志头部使用。
+    var channelDescription: String { channel }
+
     func requestWorkspaces() { send(["type": "workspaces"]) }
     func requestSessions() { send(["type": "sessions"]) }
     func requestHost() { send(["type": "host"]) }

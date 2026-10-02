@@ -342,6 +342,38 @@ final class AppStore: ObservableObject {
     @Published private(set) var createdDirectoryPathToReveal: String?
     @Published var workspaceCreationIsLoading = false
     @Published var protocolNotices: [GatewayNotice] = []
+    /// [LOCAL-DIAG] 诊断日志环形缓冲（上限 800 条）。os_log 要连 Mac 才读得到，
+    /// 而本机没有 Mac —— 所以诊断必须在 App 内可取回。设置页有「导出诊断日志」按钮。
+    @Published private(set) var diagnosticLog: [String] = []
+    private static let diagnosticLogLimit = 800
+
+    /// [LOCAL-DIAG] 记录一条诊断：本地环形缓冲 + **立即推给服务端**。
+    /// 推送是关键 —— os_log 要连 Mac（本机没有），让用户导出再发回也不可行
+    /// （他自己就提过「导出日志我可能发不回你」）。服务端日志是唯一可读出口。
+    func appendDiagnostic(_ text: String) {
+        let stamp = ISO8601DateFormatter().string(from: Date())
+        let line = "[\(stamp)] \(text)"
+        diagnosticLog.append(line)
+        if diagnosticLog.count > Self.diagnosticLogLimit {
+            diagnosticLog.removeFirst(diagnosticLog.count - Self.diagnosticLogLimit)
+        }
+        gateway.reportDiagnostic(line)
+    }
+
+    /// [LOCAL-DIAG] 导出为纯文本。头部带上连接状态与端点，便于离线判断上下文。
+    func exportDiagnosticLog() -> String {
+        let head = """
+        === DshMobile 诊断日志 ===
+        版本: \(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?") \
+        (\(Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "?"))
+        端点: \(endpoint)
+        连接状态: \(gateway.state.isConnected ? "connected" : "not-connected")
+        连接 channel: \(gateway.channelDescription)
+        共 \(diagnosticLog.count) 条
+        === 诊断条目 ===
+        """
+        return head + diagnosticLog.joined(separator: "\n")
+    }
     @Published var endpoint: String { didSet { preferences.endpoint = endpoint } }
     @Published var interfaceStyle: InterfaceStyle = .system
     @Published var appLanguage: AppLanguage {
@@ -664,7 +696,7 @@ final class AppStore: ObservableObject {
         // 写进只有用户看不到的通道等于没写。这个闭包就是本次排查唯一的观测出口。
         GatewayClient.onDiagnostic = { [weak self] text in
             Task { @MainActor in
-                self?.notice("连接诊断", text, isError: true)
+                self?.appendDiagnostic(text)
             }
         }
         self.backgroundExecutionController.onKeepAlivePulse = { [weak self] in
@@ -3549,9 +3581,10 @@ final class AppStore: ObservableObject {
             // [LOCAL-DIAG] 超时诊断对**所有** kind 开放（上游原本只在 agent-presets 分支输出）。
             // elapsed 与 connected 是判定本次超时属于「链路断开」还是「响应被丢弃」的关键。
             // UI 行为保持不变：agent-presets 仍走专用错误文案并 return。
-            self.notice("请求诊断", "请求超时 kind=\(effect.requestKey) token=\(effect.requestToken) elapsed=\(Date().timeIntervalSince(startedAt))s connected=\(self.gateway.state.isConnected)", isError: true)
+            self.appendDiagnostic("请求超时 kind=\(effect.requestKey) token=\(effect.requestToken) elapsed=\(Date().timeIntervalSince(startedAt))s connected=\(self.gateway.state.isConnected)")
             if effect.requestKey == "agent-presets" {
                 self.agentPresetsLoadError = String(localized: "Agent 预设加载超时，请重试。")
+                self.notice("请求诊断", "请求超时 kind=\(effect.requestKey) elapsed=\(Date().timeIntervalSince(startedAt))s connected=\(self.gateway.state.isConnected)", isError: true)
                 return
             }
             if let sessionID = effect.sessionId, self.preparedConversationActivationKey != sessionID { return }
