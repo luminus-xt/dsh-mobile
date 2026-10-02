@@ -20,11 +20,13 @@ jobs:
       - name: Select Xcode
         run: |
           set -euo pipefail
-          # 不写死路径：runner 镜像的 Xcode 目录带小版本号（实际是 Xcode_16.2.app），
-          # 写死会在镜像更新时静默失败。取版本号最高的一个。
-          XCODE="$(ls -d /Applications/Xcode_*.app 2>/dev/null | sort -V | tail -1)"
-          if [ -z "$XCODE" ]; then
-            echo "::error::runner 上没有找到任何 Xcode"; ls -1 /Applications/ | head -20; exit 1
+          # 锁定到 runner 的 default Xcode（macos-14 上是 15.4），**不要取最高版本**。
+          # 原因：chatlayout 2.4.3 声明 swift-tools-version:6.1，实测在 Xcode 16.2 上
+          # 解析失败 —— "contains incompatible tools version (6.1.0)"。
+          # 官方 v1.7.0 Release（2026-09-30）也是 default Xcode 编出来的。
+          XCODE="${XCODE_PATH:-/Applications/Xcode.app}"
+          if [ ! -d "$XCODE" ]; then
+            echo "::error::default Xcode 不存在: $XCODE"; ls -1d /Applications/Xcode*.app; exit 1
           fi
           echo "使用 $XCODE"
           sudo xcode-select -s "$XCODE"
