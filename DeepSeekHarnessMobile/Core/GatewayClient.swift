@@ -697,9 +697,7 @@ final class GatewayClient: ObservableObject {
                     // 而它**不会**断连接、此前也**不留任何痕迹**。这里把 kind/字节数/
                     // 错误摘要/孤立代理对出现次数记下来 —— 后者是上游 issue #29 / #14 的已知诱因。
                     Self.frameDiagLogger.error(
-                        "frame decode-failed channel=\(self.channel, privacy: .public) bytes=\(data.count) " +
-                        "loneSurrogates=\(data.loneSurrogateCount, privacy: .public) " +
-                        "error=\(GatewayWireDecoder.failureDescription(error), privacy: .public)"
+                        "frame decode-failed channel=\(self.channel, privacy: .public) bytes=\(data.count) loneSurrogates=\(data.loneSurrogateCount, privacy: .public) error=\(GatewayWireDecoder.failureDescription(error), privacy: .public)"
                     )
                     onFrame?(GatewayFrame(kind: "error", code: "decode-failed", message: GatewayWireDecoder.failureDescription(error)))
                 }
@@ -710,9 +708,7 @@ final class GatewayClient: ObservableObject {
             // [LOCAL-DIAG] 传输层断开：这条路径此前只把 error 交给 handleFailure，
             // 不留痕迹。网关侧只能看到 code=1006 且无 close frame，无法判断是谁先动的。
             Self.frameDiagLogger.error(
-                "transport failed channel=\(channel, privacy: .public) " +
-                "state=\(String(describing: state), privacy: .public) " +
-                "error=\(error.localizedDescription, privacy: .public)"
+                "transport failed channel=\(channel, privacy: .public) state=\(String(describing: state), privacy: .public) error=\(error.localizedDescription, privacy: .public)"
             )
             handleFailure(error, socket: socket)
         }
@@ -875,9 +871,7 @@ final class GatewayClient: ObservableObject {
                         self.consecutivePingFailures += 1
                         guard self.consecutivePingFailures >= Self.PING_FAILURE_LIMIT else {
                             Self.frameDiagLogger.error(
-                                "ping failed \(self.consecutivePingFailures)/\(Self.PING_FAILURE_LIMIT) " +
-                                "channel=\(self.channel, privacy: .public) " +
-                                "error=\(error.localizedDescription, privacy: .public)"
+                                "ping failed \(self.consecutivePingFailures)/\(Self.PING_FAILURE_LIMIT) channel=\(self.channel, privacy: .public) error=\(error.localizedDescription, privacy: .public)"
                             )
                             return
                         }
