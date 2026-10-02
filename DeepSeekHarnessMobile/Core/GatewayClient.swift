@@ -708,7 +708,7 @@ final class GatewayClient: ObservableObject {
             // [LOCAL-DIAG] 传输层断开：这条路径此前只把 error 交给 handleFailure，
             // 不留痕迹。网关侧只能看到 code=1006 且无 close frame，无法判断是谁先动的。
             Self.frameDiagLogger.error(
-                "transport failed channel=\(channel, privacy: .public) state=\(String(describing: state), privacy: .public) error=\(error.localizedDescription, privacy: .public)"
+                "transport failed channel=\(self.channel, privacy: .public) state=\(String(describing: self.state), privacy: .public) error=\(error.localizedDescription, privacy: .public)"
             )
             handleFailure(error, socket: socket)
         }
