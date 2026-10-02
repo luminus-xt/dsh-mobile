@@ -3522,8 +3522,12 @@ final class AppStore: ObservableObject {
         let startedAt = Date()
         if effect.requestKey == "agent-presets" {
             agentPresetsLoadError = nil
-            notice("Agent 预设诊断", "开始请求 token=\(effect.requestToken) connected=\(gateway.state.isConnected)")
         }
+        // [LOCAL-DIAG] 请求诊断对**所有** kind 开放（上游原本只对 agent-presets 输出）。
+        // 目的：在请求发起那一刻记录 connected，用来区分
+        // 「链路当时真断了」与「链路正常但响应没被接住」——这是判定
+        // "xxx 请求超时，请检查 Mobile Gateway" 的唯一判据，此前完全不可见。
+        notice("请求诊断", "开始请求 kind=\(effect.requestKey) token=\(effect.requestToken) connected=\(gateway.state.isConnected)")
         tracker.begin(effect.requestKey, timeout: .seconds(12)) { [weak self] in
             guard let self,
                   self.kmpSessionControlStore.snapshot.requestTokens[effect.requestKey] == effect.requestToken else {
@@ -3534,9 +3538,12 @@ final class AppStore: ObservableObject {
                 isDefault: isDefault,
                 requestToken: effect.requestToken
             ))
+            // [LOCAL-DIAG] 超时诊断对**所有** kind 开放（上游原本只在 agent-presets 分支输出）。
+            // elapsed 与 connected 是判定本次超时属于「链路断开」还是「响应被丢弃」的关键。
+            // UI 行为保持不变：agent-presets 仍走专用错误文案并 return。
+            self.notice("请求诊断", "请求超时 kind=\(effect.requestKey) token=\(effect.requestToken) elapsed=\(Date().timeIntervalSince(startedAt))s connected=\(self.gateway.state.isConnected)", isError: true)
             if effect.requestKey == "agent-presets" {
                 self.agentPresetsLoadError = String(localized: "Agent 预设加载超时，请重试。")
-                self.notice("Agent 预设诊断", "请求超时 token=\(effect.requestToken) elapsed=\(Date().timeIntervalSince(startedAt))s connected=\(self.gateway.state.isConnected)", isError: true)
                 return
             }
             if let sessionID = effect.sessionId, self.preparedConversationActivationKey != sessionID { return }

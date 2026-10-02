@@ -5,6 +5,15 @@ import OSLog
 @MainActor
 final class GatewayClient: ObservableObject {
     private static let presetLogger = Logger(subsystem: "ai.dsh.mobile.ios", category: "agent-presets")
+    // [LOCAL-DIAG] 帧级诊断日志。此前「xxx 请求超时」只有服务端能看到，
+    // 客户端这一侧完全不可见 —— 而解码失败恰好**不拆连接**（见 receiveLoop 的内层 catch），
+    // 只发一个 error 帧，于是请求永远等不到、12s 后报超时，服务端却记着 query ok。
+    // 这是判定「响应没被接住」的根因判据。
+    private static let frameDiagLogger = Logger(subsystem: "ai.dsh.mobile.ios", category: "frame-diag")
+    /// [LOCAL-FIX-3] 连续 ping 失败多少次才判定链路死亡。3 次 ≈ 90s，与服务端 keepalive
+    /// 的 `KEEPALIVE_MISS_LIMIT` 同量级；连不上时首条 `hello` 的 15s 超时仍会兜底。
+    private static let PING_FAILURE_LIMIT = 3
+    private var consecutivePingFailures = 0
     private let channel: String
     var credentialID: String?
     var expectedGatewayID: String?
@@ -166,6 +175,12 @@ final class GatewayClient: ObservableObject {
     func applicationDidBecomeActive() {
         isApplicationInBackground = false
         guard wantsConnection, !state.isConnected, let endpoint else { return }
+        // [LOCAL-FIX-2] scenePhase == .active 可能连续投递多次；每次多余投递都会走
+        // beginConnection()，而它第一行是 disconnect(reconnect: false)，
+        // 于是把**仍在握手中**的 socket 取消掉 → NSPOSIXErrorDomain 53，
+        // 网关侧表现为连接后数十毫秒即 code=1006。
+        // 已有连接尝试在进行中时直接跳过；真正卡住的尝试仍由 startConnectionTimeout 兜底。
+        if case .connecting = state { return }
         reconnectTask?.cancel()
         reconnectTask = nil
         beginConnection(
@@ -678,12 +693,27 @@ final class GatewayClient: ObservableObject {
                     deliverApplicationFrame(frame, data: data)
                 } catch {
                     // One future or malformed frame must not tear down an otherwise healthy socket.
+                    // [LOCAL-DIAG] 解码失败是「服务端 query ok 但客户端报超时」最可能的成因，
+                    // 而它**不会**断连接、此前也**不留任何痕迹**。这里把 kind/字节数/
+                    // 错误摘要/孤立代理对出现次数记下来 —— 后者是上游 issue #29 / #14 的已知诱因。
+                    Self.frameDiagLogger.error(
+                        "frame decode-failed channel=\(self.channel, privacy: .public) bytes=\(data.count) " +
+                        "loneSurrogates=\(data.loneSurrogateCount, privacy: .public) " +
+                        "error=\(GatewayWireDecoder.failureDescription(error), privacy: .public)"
+                    )
                     onFrame?(GatewayFrame(kind: "error", code: "decode-failed", message: GatewayWireDecoder.failureDescription(error)))
                 }
             }
         } catch is CancellationError {
             return
         } catch {
+            // [LOCAL-DIAG] 传输层断开：这条路径此前只把 error 交给 handleFailure，
+            // 不留痕迹。网关侧只能看到 code=1006 且无 close frame，无法判断是谁先动的。
+            Self.frameDiagLogger.error(
+                "transport failed channel=\(channel, privacy: .public) " +
+                "state=\(String(describing: state), privacy: .public) " +
+                "error=\(error.localizedDescription, privacy: .public)"
+            )
             handleFailure(error, socket: socket)
         }
     }
@@ -828,9 +858,31 @@ final class GatewayClient: ObservableObject {
                 do { try await Task.sleep(for: .seconds(30)) } catch { return }
                 guard let self, let socket, self.socket === socket, self.state.isConnected else { return }
                 socket.sendPing { [weak self, weak socket] error in
-                    guard let error else { return }
                     Task { @MainActor [weak self, weak socket] in
-                        self?.handleFailure(error, socket: socket)
+                        guard let self, let socket else { return }
+                        // pong 正常回来 ⇒ 计数清零。只在**连续**失败时累积，
+                        // 否则分散在几小时里的瞬时抖动会攒够阈值反而误杀连接。
+                        guard let error else {
+                            self.consecutivePingFailures = 0
+                            return
+                        }
+                        // [LOCAL-FIX-3] 原本**任何一次** ping 失败都直接 handleFailure 拆连接，
+                        // 零容忍。实测一次网络抖动就足以杀掉两条通道：
+                        // sendPing 返回 -1001（NSURLErrorTimedOut）时，handleFailure 只挡
+                        // -999 不挡 -1001，于是 fail() 走 socket.cancel(.goingAway)，
+                        // **不发 close 帧** —— 服务端只能看到 code=1006，无法判断是谁先动的。
+                        // 策略与服务端 keepalive 一致：容忍连续失败 N 次再判定链路死亡。
+                        self.consecutivePingFailures += 1
+                        guard self.consecutivePingFailures >= Self.PING_FAILURE_LIMIT else {
+                            Self.frameDiagLogger.error(
+                                "ping failed \(self.consecutivePingFailures)/\(Self.PING_FAILURE_LIMIT) " +
+                                "channel=\(self.channel, privacy: .public) " +
+                                "error=\(error.localizedDescription, privacy: .public)"
+                            )
+                            return
+                        }
+                        self.consecutivePingFailures = 0
+                        self.handleFailure(error, socket: socket)
                     }
                 }
             }
@@ -990,6 +1042,29 @@ private enum GatewayTokenStore {
         var errorDescription: String? {
             (SecCopyErrorMessageString(status, nil) as String?) ?? String(localized: "keychain.error.status", defaultValue: "Keychain 错误 \(status)")
         }
+    }
+}
+
+// [LOCAL-DIAG] 统计帧里**非法 UTF-8 代理对编码**（CESU-8 风格的 ED A0..BF 三字节序列）。
+// 上游 issue（dsh-mobile #29 / mobile-gateway #14）记录过：预览按 UTF-16 slice 截断
+// 会切出半个代理对，产出 ED A0..BF 这类非法 UTF-8，JSONDecoder 随即拒收整帧。
+// 出现即说明帧不是合法 UTF-8 —— 这正是「服务端 query ok、客户端却超时」的根因候选。
+private extension Data {
+    var loneSurrogateCount: Int {
+        let bytes = [UInt8](self)
+        var count = 0
+        var index = 0
+        while index + 2 < bytes.count {
+            if bytes[index] == 0xED,
+               bytes[index + 1] >= 0xA0, bytes[index + 1] <= 0xBF,
+               bytes[index + 2] >= 0x80, bytes[index + 2] <= 0xBF {
+                count += 1
+                index += 3
+            } else {
+                index += 1
+            }
+        }
+        return count
     }
 }
 
