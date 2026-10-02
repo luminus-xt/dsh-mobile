@@ -45,6 +45,10 @@ jobs:
       - name: Archive (unsigned)
         run: |
           set -euo pipefail
+          # 用 exit code 判定成败，不再 grep 过滤输出。
+          # 实测教训：archive 成功时输出的是「** ARCHIVE SUCCEEDED **」，
+          # 而原过滤器只匹配「BUILD SUCCEEDED」⇒ grep 无输出 + pipefail ⇒
+          # 编译成功却被判成失败。grep 化判据既会假红也会假绿。
           xcodebuild archive \
             -project DeepSeekHarnessMobile.xcodeproj \
             -scheme DeepSeekHarnessMobile \
@@ -55,9 +59,15 @@ jobs:
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGN_ENTITLEMENTS="" \
-            | tee build-xcodebuild.log \
-            | grep -E "error:|BUILD (SUCCEEDED|FAILED)" \
-            || { echo "::error::xcodebuild produced no expected output"; tail -60 build-xcodebuild.log; exit 1; }
+            > build-xcodebuild.log 2>&1 || {
+              echo "::error::xcodebuild archive 失败，日志尾部："
+              grep -E '(error|warning): ' build-xcodebuild.log | head -40 || true
+              echo "---- 最后 40 行 ----"
+              tail -40 build-xcodebuild.log
+              exit 1
+            }
+          grep -E 'ARCHIVE SUCCEEDED|ARCHIVE FAILED' build-xcodebuild.log || {
+            echo "::error::未在输出中找到 ARCHIVE 结果标记"; tail -40 build-xcodebuild.log; exit 1; }
       - name: Package unsigned IPA
         run: |
           set -euo pipefail
