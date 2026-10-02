@@ -1,0 +1,56 @@
+Enter file contents herename: iOS unsigned IPA
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - 'fix/**'
+
+concurrency:
+  group: ios-ipa-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build unsigned IPA (iOS 17+)
+    runs-on: macos-14
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Select Xcode
+        run: |
+          sudo xcode-select -s /Applications/Xcode_16.app
+          xcodebuild -version
+          java -version
+      - name: Archive (unsigned)
+        run: |
+          set -euo pipefail
+          xcodebuild archive \
+            -project DeepSeekHarnessMobile.xcodeproj \
+            -scheme DeepSeekHarnessMobile \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -archivePath build/dsh-mobile.xcarchive \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGN_ENTITLEMENTS="" \
+            | tee build-xcodebuild.log \
+            | grep -E "error:|BUILD (SUCCEEDED|FAILED)" \
+            || { echo "::error::xcodebuild produced no expected output"; tail -60 build-xcodebuild.log; exit 1; }
+      - name: Package unsigned IPA
+        run: |
+          set -euo pipefail
+          APP_DIR="$(find build/dsh-mobile.xcarchive/Products -maxdepth 2 -name '*.app' -print -quit)"
+          [ -n "$APP_DIR" ] || { echo "::error::no .app in archive"; exit 1; }
+          ls -1 "$APP_DIR/PlugIns" 2>/dev/null || echo "(no PlugIns)"
+          rm -rf build/ipa && mkdir -p build/ipa/Payload
+          cp -R "$APP_DIR" "build/ipa/Payload/$(basename "$APP_DIR")"
+          (cd build/ipa && zip -qry ../dsh-mobile-unsigned.ipa Payload)
+          ls -lh build/dsh-mobile-unsigned.ipa
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dsh-mobile-unsigned-ipa
+          path: build/dsh-mobile-unsigned.ipa
+          retention-days: 30
+          if-no-files-found: error
