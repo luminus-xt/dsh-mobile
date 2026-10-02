@@ -13,17 +13,19 @@ concurrency:
 jobs:
   build:
     name: Build unsigned IPA (iOS 17+)
-    runs-on: macos-14
+    runs-on: macos-15
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
       - name: Select Xcode
         run: |
           set -euo pipefail
-          # 锁定到 runner 的 default Xcode（macos-14 上是 15.4），**不要取最高版本**。
-          # 原因：chatlayout 2.4.3 声明 swift-tools-version:6.1，实测在 Xcode 16.2 上
-          # 解析失败 —— "contains incompatible tools version (6.1.0)"。
-          # 官方 v1.7.0 Release（2026-09-30）也是 default Xcode 编出来的。
+          # 用 macos-15 runner 的 default Xcode（16.4，swift-tools 6.1）。
+          # 实测记录（勿回退）：
+          #   macos-14 + Xcode 15.4（tools 5.10）→ 拒收 chatlayout 2.4.3
+          #   macos-14 + Xcode 16.2（tools 6.0） → 同样拒收
+          # chatlayout @ cf01193 的 Package.swift 首行是 swift-tools-version:6.1，
+          # 只有 tools 6.1 的 SPM 才能解析。
           XCODE="${XCODE_PATH:-/Applications/Xcode.app}"
           if [ ! -d "$XCODE" ]; then
             echo "::error::default Xcode 不存在: $XCODE"; ls -1d /Applications/Xcode*.app; exit 1
@@ -31,6 +33,8 @@ jobs:
           echo "使用 $XCODE"
           sudo xcode-select -s "$XCODE"
           xcodebuild -version
+          # tools 版本必须 >= 6.1，否则 SPM 解析阶段就失败（见上方实测）
+          xcodebuild -version | grep -q 'Xcode 16' || { echo "::error::Xcode 版本过低"; exit 1; }
           java -version
       - name: Archive (unsigned)
         run: |
