@@ -33,10 +33,14 @@ jobs:
           echo "使用 $XCODE"
           sudo xcode-select -s "$XCODE"
           xcodebuild -version
-          # 源码使用 iOS 26 API，必须 Xcode 26+；镜像若降级 default 就在这里挡住，
-          # 而不是等 8 分钟后拿一堆 API 缺失的编译错误。
-          xcodebuild -version | grep -qE 'Xcode (2[6-9]|[3-9][0-9])' \
-            || { echo "::error::需要 Xcode 26+，当前: $(xcodebuild -version | head -1)"; exit 1; }
+          # 源码使用 iOS 26 API（glassEffect / ToolbarSpacer / buttonSizing），
+          # 必须 Xcode 26+。用变量取值而非管道 grep：管道会在 xcodebuild 提前退出时
+          # 触发 SIGPIPE，让 set -o pipefail 误判。macos-26 的 default 是 26.x。
+          XV="$(xcodebuild -version | sed -n '1s/^Xcode \([0-9][0-9]*\).*/\1/p')"
+          echo "Xcode 主版本=$XV"
+          if [ -z "$XV" ] || [ "$XV" -lt 26 ]; then
+            echo "::error::需要 Xcode 26+，实际 $XV"; exit 1
+          fi
           java -version
       - name: Archive (unsigned)
         run: |
