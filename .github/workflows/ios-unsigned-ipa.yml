@@ -19,7 +19,15 @@ jobs:
       - uses: actions/checkout@v4
       - name: Select Xcode
         run: |
-          sudo xcode-select -s /Applications/Xcode_16.app
+          set -euo pipefail
+          # 不写死路径：runner 镜像的 Xcode 目录带小版本号（实际是 Xcode_16.2.app），
+          # 写死会在镜像更新时静默失败。取版本号最高的一个。
+          XCODE="$(ls -d /Applications/Xcode_*.app 2>/dev/null | sort -V | tail -1)"
+          if [ -z "$XCODE" ]; then
+            echo "::error::runner 上没有找到任何 Xcode"; ls -1 /Applications/ | head -20; exit 1
+          fi
+          echo "使用 $XCODE"
+          sudo xcode-select -s "$XCODE"
           xcodebuild -version
           java -version
       - name: Archive (unsigned)
