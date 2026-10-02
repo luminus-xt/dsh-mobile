@@ -52,6 +52,16 @@ final class GatewayClient: ObservableObject {
     /// event is itself larger than the page budget.
     private static let maximumIncomingMessageSize = 64 * 1024 * 1024
 
+    /// [LOCAL-DIAG] 把帧级诊断**同时**投递到 AppStore 的协议通知中心。
+    /// 为什么必须走 AppStore 而不只靠 os_log：os_log 要连 Mac + Xcode Console 才读得到，
+    /// 而本机没有 Mac —— 诊断写进只有用户看不到的地方等于没写。
+    /// AppStore 会把它渲染成 App 内可见的通知（和「Agent 预设诊断」同一条通道）。
+    static var onDiagnostic: ((String) -> Void)?
+    private static func emitDiag(_ message: String) {
+        onDiagnostic?(message)
+        frameDiagLogger.error("\(message, privacy: .public)")
+    }
+
     @Published private(set) var state: ConnectionState = .disconnected
     @Published private(set) var serverPort: Int?
     @Published private(set) var clientCount: Int?
@@ -696,9 +706,9 @@ final class GatewayClient: ObservableObject {
                     // [LOCAL-DIAG] 解码失败是「服务端 query ok 但客户端报超时」最可能的成因，
                     // 而它**不会**断连接、此前也**不留任何痕迹**。这里把 kind/字节数/
                     // 错误摘要/孤立代理对出现次数记下来 —— 后者是上游 issue #29 / #14 的已知诱因。
-                    Self.frameDiagLogger.error(
+                    Self.emitDiag(
                         "frame decode-failed channel=\(self.channel, privacy: .public) bytes=\(data.count) loneSurrogates=\(data.loneSurrogateCount, privacy: .public) error=\(GatewayWireDecoder.failureDescription(error), privacy: .public)"
-                    )
+                        .trimCharacters(in: .whitespacesAndNewlines))
                     onFrame?(GatewayFrame(kind: "error", code: "decode-failed", message: GatewayWireDecoder.failureDescription(error)))
                 }
             }
@@ -707,9 +717,9 @@ final class GatewayClient: ObservableObject {
         } catch {
             // [LOCAL-DIAG] 传输层断开：这条路径此前只把 error 交给 handleFailure，
             // 不留痕迹。网关侧只能看到 code=1006 且无 close frame，无法判断是谁先动的。
-            Self.frameDiagLogger.error(
+            Self.emitDiag(
                 "transport failed channel=\(self.channel, privacy: .public) state=\(String(describing: self.state), privacy: .public) error=\(error.localizedDescription, privacy: .public)"
-            )
+                .trimCharacters(in: .whitespacesAndNewlines))
             handleFailure(error, socket: socket)
         }
     }
@@ -870,9 +880,9 @@ final class GatewayClient: ObservableObject {
                         // 策略与服务端 keepalive 一致：容忍连续失败 N 次再判定链路死亡。
                         self.consecutivePingFailures += 1
                         guard self.consecutivePingFailures >= Self.PING_FAILURE_LIMIT else {
-                            Self.frameDiagLogger.error(
+                            Self.emitDiag(
                                 "ping failed \(self.consecutivePingFailures)/\(Self.PING_FAILURE_LIMIT) channel=\(self.channel, privacy: .public) error=\(error.localizedDescription, privacy: .public)"
-                            )
+                                .trimCharacters(in: .whitespacesAndNewlines))
                             return
                         }
                         self.consecutivePingFailures = 0

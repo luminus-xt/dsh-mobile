@@ -659,6 +659,14 @@ final class AppStore: ObservableObject {
         gateway.onConnectionFailure = { [weak self] detail in
             self?.handleConnectionFailure(detail)
         }
+        // [LOCAL-DIAG] 帧级诊断接进协议通知中心（App 内可见）。
+        // 为什么不只留 os_log：os_log 需要连 Mac + Xcode Console，而本机没有 Mac ——
+        // 写进只有用户看不到的通道等于没写。这个闭包就是本次排查唯一的观测出口。
+        GatewayClient.onDiagnostic = { [weak self] text in
+            Task { @MainActor in
+                self?.notice("连接诊断", text, isError: true)
+            }
+        }
         self.backgroundExecutionController.onKeepAlivePulse = { [weak self] in
             if self?.gateway.state.isConnected == true { self?.gateway.ping() }
             AgentLiveActivityManager.shared.refreshActiveActivities()
