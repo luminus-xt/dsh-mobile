@@ -717,7 +717,7 @@ final class GatewayClient: ObservableObject {
                     // [LOCAL-DIAG] 解码失败是「服务端 query ok 但客户端报超时」最可能的成因，
                     // 而它**不会**断连接、此前也**不留任何痕迹**。这里把 kind/字节数/
                     // 错误摘要/孤立代理对出现次数记下来 —— 后者是上游 issue #29 / #14 的已知诱因。
-                    Self.emitDiag("frame decode-failed channel=\(self.channel) bytes=\(data.count) loneSurrogates=\(data.loneSurrogateCount) error=\(GatewayWireDecoder.failureDescription(error))")
+                    Self.emitDiag("frame decode-failed channel=\(self.channel) bytes=\(data.count) surrogateEsc=\(data.surrogateDiagnostics.escape) surrogateRaw=\(data.surrogateDiagnostics.raw) uFFFD=\(data.surrogateDiagnostics.replacement) error=\(GatewayWireDecoder.failureDescription(error))")
                     onFrame?(GatewayFrame(kind: "error", code: "decode-failed", message: GatewayWireDecoder.failureDescription(error)))
                 }
             }
@@ -770,6 +770,16 @@ final class GatewayClient: ObservableObject {
             break
         }
         if !acceptSessionCreationFrame(frame) { onFrame?(frame) }
+        // [LOCAL-DIAG] 每一帧到达都记录一次（kind + requestType + bytes + 时标）。
+        // 这是唯一能区分「服务端没发 / 代理吞了 / 客户端不认领」的观测点 ——
+        // 此前只记录解码失败与传输错误，而这三者都不触发时（帧根本没来）
+        // 就完全无痕，只能靠推断。所有历史误判都源于缺这一条。
+        // 只记录 control 通道且与查询相关的 kind，避免刷屏淹没网关日志。
+        if channel == "control",
+           ["context-usage", "session-stats", "permission-options", "agent-presets",
+            "models", "history", "error", "permission-catalog"].contains(frame.kind) {
+            Self.emitDiag("frame-in channel=\(self.channel) kind=\(frame.kind) requestType=\(frame.requestType ?? "-") bytes=\(data.count) requestId=\(frame.requestId ?? "-")")
+        }
     }
 
     private func handleFailure(_ error: Error, socket: URLSessionWebSocketTask? = nil) {
@@ -1059,21 +1069,42 @@ private enum GatewayTokenStore {
 // 会切出半个代理对，产出 ED A0..BF 这类非法 UTF-8，JSONDecoder 随即拒收整帧。
 // 出现即说明帧不是合法 UTF-8 —— 这正是「服务端 query ok、客户端却超时」的根因候选。
 private extension Data {
-    var loneSurrogateCount: Int {
+    /// [LOCAL-DIAG] 孤立代理对计数。
+    ///
+    /// 原实现只扫裸 UTF-8 的 `ED A0..BF` 字节序列，**在本系统恒为 0、没有鉴别力**：
+    ///   ① 服务端 wire-json.mjs 的 stringifyWireFrame 已把所有孤立代理替换成 `U+FFFD`；
+    ///   ② JSON.stringify 遇到孤立代理时输出的是 ASCII 转义 `\uD800`（8 字节文本），
+    ///      不是裸字节。
+    /// 因此只扫裸字节，即使 #29 / #14 复现也测不出来 —— 我曾据此错误地「证伪」过该假说。
+    ///
+    /// 现在同时统计两种形态：`\uD8xx` 转义与裸 UTF-8 序列，并分别报数。
+    var surrogateDiagnostics: (escape: Int, raw: Int, replacement: Int) {
         let bytes = [UInt8](self)
-        var count = 0
+        var escape = 0, raw = 0, replacement = 0
         var index = 0
         while index + 2 < bytes.count {
             if bytes[index] == 0xED,
                bytes[index + 1] >= 0xA0, bytes[index + 1] <= 0xBF,
                bytes[index + 2] >= 0x80, bytes[index + 2] <= 0xBF {
-                count += 1
+                raw += 1
                 index += 3
-            } else {
-                index += 1
+                continue
             }
+            index += 1
         }
-        return count
+        if let text = String(data: self, encoding: .utf8) {
+            // `\uD800` 形式的转义（JSON.stringify 的输出）
+            escape = text.components(separatedBy: "\\uD8").count - 1
+                + text.components(separatedBy: "\\uD9").count - 1
+                + text.components(separatedBy: "\\uDA").count - 1
+                + text.components(separatedBy: "\\uDB").count - 1
+                + text.components(separatedBy: "\\uDC").count - 1
+                + text.components(separatedBy: "\\uDD").count - 1
+                + text.components(separatedBy: "\\uDE").count - 1
+            // 服务端替换痕迹：U+FFFD 在 UTF-8 中是 EF BF BD
+            replacement = text.components(separatedBy: "\u{FFFD}").count - 1
+        }
+        return (escape, raw, replacement)
     }
 }
 
