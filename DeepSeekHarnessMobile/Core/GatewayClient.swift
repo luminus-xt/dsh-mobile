@@ -652,6 +652,12 @@ final class GatewayClient: ObservableObject {
         do {
             while !Task.isCancelled {
                 let message = try await socket.receive()
+                // [LOCAL-DIAG] socket 交帧的时刻。这是区分两种延迟的关键分界：
+                //   · 延迟在「到达之前」⇒ URLSession / 代理没及时投递，与 MainActor 无关
+                //   · 延迟在「到达之后」⇒ MainActor 被阻塞，帧到了但排队等执行
+                // 只有这一个时间点能判别；此前的诊断都缺它，导致反复改错方向。
+                lastFrameReceivedAtNs = DispatchTime.now().uptimeNanoseconds
+                lastFrameReceivedAtMs = Double(lastFrameReceivedAtNs / 1_000_000)
                 let data: Data
                 switch message {
                 case .string(let text): data = Data(text.utf8)
@@ -791,9 +797,13 @@ final class GatewayClient: ObservableObject {
            ["context-usage", "session-stats", "permission-options", "agent-presets",
             "models", "session-created", "sessions", "history", "error",
             "permission-catalog"].contains(frame.kind) {
-            Self.emitDiag("frame-in channel=\(self.channel) kind=\(frame.kind) requestType=\(frame.requestType ?? "-") bytes=\(data.count) requestId=\(frame.requestId ?? "-")")
+            Self.emitDiag("frame-in channel=\(self.channel) kind=\(frame.kind) requestType=\(frame.requestType ?? "-") bytes=\(data.count) requestId=\(frame.requestId ?? "-") tRecvMs=\(lastFrameReceivedAtMs) dispatchMs=\(String(format: "%.2f", Double(DispatchTime.now().uptimeNanoseconds - lastFrameReceivedAtNs) / 1_000_000))")
         }
     }
+
+    /// [LOCAL-DIAG] 最近一次 socket.receive() 返回的 uptime 纳秒，仅用于算 dispatch 耗时。
+    private var lastFrameReceivedAtNs: UInt64 = 0
+    private var lastFrameReceivedAtMs: Double = -1
 
     private func handleFailure(_ error: Error, socket: URLSessionWebSocketTask? = nil) {
         guard wantsConnection else { return }
