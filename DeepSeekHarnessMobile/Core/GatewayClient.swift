@@ -57,6 +57,11 @@ final class GatewayClient: ObservableObject {
     /// 而本机没有 Mac —— 诊断写进只有用户看不到的地方等于没写。
     /// AppStore 会把它渲染成 App 内可见的通知（和「Agent 预设诊断」同一条通道）。
     static var onDiagnostic: ((String) -> Void)?
+    /// [LOCAL-DIAG] 需要记录发送时刻的查询类型（与 frame-in 的 kind 集合保持对应）。
+    private static let diagKinds: Set<String> = [
+        "context-usage", "session-stats", "permission-options", "agent-presets",
+        "models", "session-create", "sessions", "workspaces",
+    ]
     private static func emitDiag(_ message: String) {
         onDiagnostic?(message)
         frameDiagLogger.error("\(message, privacy: .public)")
@@ -595,6 +600,13 @@ final class GatewayClient: ObservableObject {
             let data = try JSONSerialization.data(withJSONObject: object)
             let text = String(decoding: data, as: UTF8.self)
             if deferUntilConversationHello(text) { return }
+            // [LOCAL-DIAG] 记录查询的**发出**时刻。此前只记录超时时刻与帧到达时刻，
+            // 缺少基准就无法算出真实延迟，只能靠单点比对反复误判（曾据此错误地
+            // 推出「接收循环阻塞 27 秒」，实际该结论被后续数据推翻）。
+            // 有了发出时刻，才能把 「服务端处理耗时 / 网络 / 客户端排队」三段分开。
+            if Self.diagKinds.contains(object["type"] as? String ?? "") {
+                Self.emitDiag("query-out type=\(object["type"] as? String ?? "-") bytes=\(data.count)")
+            }
             write(text, to: socket, logsPresets: object["type"] as? String == "agent-presets")
         } catch {
             state = .failed(error.localizedDescription)
@@ -777,7 +789,8 @@ final class GatewayClient: ObservableObject {
         // 只记录 control 通道且与查询相关的 kind，避免刷屏淹没网关日志。
         if channel == "control",
            ["context-usage", "session-stats", "permission-options", "agent-presets",
-            "models", "history", "error", "permission-catalog"].contains(frame.kind) {
+            "models", "session-created", "sessions", "history", "error",
+            "permission-catalog"].contains(frame.kind) {
             Self.emitDiag("frame-in channel=\(self.channel) kind=\(frame.kind) requestType=\(frame.requestType ?? "-") bytes=\(data.count) requestId=\(frame.requestId ?? "-")")
         }
     }
