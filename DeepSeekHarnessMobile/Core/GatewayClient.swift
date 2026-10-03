@@ -5,6 +5,10 @@ import OSLog
 @MainActor
 final class GatewayClient: ObservableObject {
     private static let presetLogger = Logger(subsystem: "ai.dsh.mobile.ios", category: "agent-presets")
+    /// [LOCAL-FIX-3] 连续 ping 失败多少次才判定链路死亡。3 次 ≈ 90s，与服务端 keepalive
+    /// 的 `KEEPALIVE_MISS_LIMIT` 同量级；连不上时首条 `hello` 的 15s 超时仍会兜底。
+    private static let PING_FAILURE_LIMIT = 3
+    private var consecutivePingFailures = 0
     private let channel: String
     var credentialID: String?
     var expectedGatewayID: String?
@@ -166,6 +170,12 @@ final class GatewayClient: ObservableObject {
     func applicationDidBecomeActive() {
         isApplicationInBackground = false
         guard wantsConnection, !state.isConnected, let endpoint else { return }
+        // [LOCAL-FIX-2] scenePhase == .active 可能连续投递多次；每次多余投递都会走
+        // beginConnection()，而它第一行是 disconnect(reconnect: false)，
+        // 于是把**仍在握手中**的 socket 取消掉 → NSPOSIXErrorDomain 53，
+        // 网关侧表现为连接后数十毫秒即 code=1006。
+        // 已有连接尝试在进行中时直接跳过；真正卡住的尝试仍由 startConnectionTimeout 兜底。
+        if case .connecting = state { return }
         reconnectTask?.cancel()
         reconnectTask = nil
         beginConnection(
@@ -828,9 +838,26 @@ final class GatewayClient: ObservableObject {
                 do { try await Task.sleep(for: .seconds(30)) } catch { return }
                 guard let self, let socket, self.socket === socket, self.state.isConnected else { return }
                 socket.sendPing { [weak self, weak socket] error in
-                    guard let error else { return }
                     Task { @MainActor [weak self, weak socket] in
-                        self?.handleFailure(error, socket: socket)
+                        guard let self, let socket else { return }
+                        // pong 正常回来 ⇒ 计数清零。只在**连续**失败时累积，
+                        // 否则分散在几小时里的瞬时抖动会攒够阈值反而误杀连接。
+                        guard let error else {
+                            self.consecutivePingFailures = 0
+                            return
+                        }
+                        // [LOCAL-FIX-3] 原本**任何一次** ping 失败都直接 handleFailure 拆连接，
+                        // 零容忍。实测一次网络抖动就足以杀掉两条通道：
+                        // sendPing 返回 -1001（NSURLErrorTimedOut）时，handleFailure 只挡
+                        // -999 不挡 -1001，于是 fail() 走 socket.cancel(.goingAway)，
+                        // **不发 close 帧** —— 服务端只能看到 code=1006，无法判断是谁先动的。
+                        // 策略与服务端 keepalive 一致：容忍连续失败 N 次再判定链路死亡。
+                        self.consecutivePingFailures += 1
+                        guard self.consecutivePingFailures >= Self.PING_FAILURE_LIMIT else {
+                            return
+                        }
+                        self.consecutivePingFailures = 0
+                        self.handleFailure(error, socket: socket)
                     }
                 }
             }

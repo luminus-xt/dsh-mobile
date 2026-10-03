@@ -1,0 +1,86 @@
+name: iOS unsigned IPA
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - 'release/**'
+
+concurrency:
+  group: ios-ipa-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build unsigned IPA (iOS 17+)
+    runs-on: macos-26
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Select Xcode
+        run: |
+          set -euo pipefail
+          # 用 macos-26 runner 的 default Xcode（26.6）。
+          # 实测记录（勿回退，这几轮踩过的坑都记在这）：
+          #   macos-14 / Xcode 15.4 → 路径错；Xcode 16.2 → SPM 拒收 chatlayout（tools 6.1）
+          #   macos-15 / Xcode 16.4 → SPM 过了，但源码用了 iOS 26 API
+          #     （Glass.swift 的 glassEffect、RootView 的 ToolbarSpacer、
+          #      WorkspaceView 的 buttonSizing）⇒ 必须 Xcode 26
+          XCODE="${XCODE_PATH:-/Applications/Xcode.app}"
+          if [ ! -d "$XCODE" ]; then
+            echo "::error::default Xcode 不存在: $XCODE"; ls -1d /Applications/Xcode*.app; exit 1
+          fi
+          echo "使用 $XCODE"
+          sudo xcode-select -s "$XCODE"
+          xcodebuild -version
+          # 源码使用 iOS 26 API（glassEffect / ToolbarSpacer / buttonSizing），
+          # 必须 Xcode 26+。用变量取值而非管道 grep：管道会在 xcodebuild 提前退出时
+          # 触发 SIGPIPE，让 set -o pipefail 误判。macos-26 的 default 是 26.x。
+          XV="$(xcodebuild -version | sed -n '1s/^Xcode \([0-9][0-9]*\).*/\1/p')"
+          echo "Xcode 主版本=$XV"
+          if [ -z "$XV" ] || [ "$XV" -lt 26 ]; then
+            echo "::error::需要 Xcode 26+，实际 $XV"; exit 1
+          fi
+          java -version
+      - name: Archive (unsigned)
+        run: |
+          set -euo pipefail
+          # 用 exit code 判定成败，不再 grep 过滤输出。
+          # 实测教训：archive 成功时输出的是「** ARCHIVE SUCCEEDED **」，
+          # 而原过滤器只匹配「BUILD SUCCEEDED」⇒ grep 无输出 + pipefail ⇒
+          # 编译成功却被判成失败。grep 化判据既会假红也会假绿。
+          xcodebuild archive \
+            -project DeepSeekHarnessMobile.xcodeproj \
+            -scheme DeepSeekHarnessMobile \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -archivePath build/dsh-mobile.xcarchive \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGN_ENTITLEMENTS="" \
+            > build-xcodebuild.log 2>&1 || {
+              echo "::error::xcodebuild archive 失败，日志尾部："
+              grep -E '(error|warning): ' build-xcodebuild.log | head -40 || true
+              echo "---- 最后 40 行 ----"
+              tail -40 build-xcodebuild.log
+              exit 1
+            }
+          grep -E 'ARCHIVE SUCCEEDED|ARCHIVE FAILED' build-xcodebuild.log || {
+            echo "::error::未在输出中找到 ARCHIVE 结果标记"; tail -40 build-xcodebuild.log; exit 1; }
+      - name: Package unsigned IPA
+        run: |
+          set -euo pipefail
+          APP_DIR="$(find build/dsh-mobile.xcarchive/Products -maxdepth 2 -name '*.app' -print -quit)"
+          [ -n "$APP_DIR" ] || { echo "::error::no .app in archive"; exit 1; }
+          ls -1 "$APP_DIR/PlugIns" 2>/dev/null || echo "(no PlugIns)"
+          rm -rf build/ipa && mkdir -p build/ipa/Payload
+          cp -R "$APP_DIR" "build/ipa/Payload/$(basename "$APP_DIR")"
+          (cd build/ipa && zip -qry ../dsh-mobile-unsigned.ipa Payload)
+          ls -lh build/dsh-mobile-unsigned.ipa
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dsh-mobile-unsigned-ipa
+          path: build/dsh-mobile-unsigned.ipa
+          retention-days: 30
+          if-no-files-found: error
