@@ -2831,8 +2831,55 @@ final class AppStore: ObservableObject {
     /// 一次发布给 UIKit timeline，避免高频 token 让 SwiftUI 根视图失效。
     private func projectIncrementally(for sessionId: String) async {
         guard !Task.isCancelled else { return }
+        // [LOCAL-DIAG] 投影耗时测量。
+        // 测量方法上的坑：若每帧都发一条 client-log，诊断本身会占用主线程与
+        // 同一条 socket，反而污染被测对象。因此**只聚合、每 3 秒发一次**。
+        // 分两段计时：取 items（跨 KMP）与 publish（含 observer→viewport 差量更新），
+        // 以便区分「跨语言取数慢」与「渲染慢」。
+        let t0 = DispatchTime.now().uptimeNanoseconds
         let items = kmpConversationStore.items(for: sessionId)
+        let t1 = DispatchTime.now().uptimeNanoseconds
         publishConversationItems(items, for: sessionId)
+        let t2 = DispatchTime.now().uptimeNanoseconds
+        recordProjectionSample(
+            fetchMs: Double(t1 - t0) / 1_000_000,
+            publishMs: Double(t2 - t1) / 1_000_000,
+            itemCount: items.count
+        )
+    }
+
+    /// [LOCAL-DIAG] 投影耗时聚合器。每 3 秒汇总一次，避免诊断洪泛。
+    private var projFrames = 0
+    private var projFetchMs: Double = 0
+    private var projPublishMs: Double = 0
+    private var projMaxFetchMs: Double = 0
+    private var projMaxPublishMs: Double = 0
+    private var projItemsMax = 0
+    private var projEmitAt = DispatchTime.now().uptimeNanoseconds
+
+    private func recordProjectionSample(fetchMs: Double, publishMs: Double, itemCount: Int) {
+        projFrames += 1
+        projFetchMs += fetchMs
+        projPublishMs += publishMs
+        projMaxFetchMs = max(projMaxFetchMs, fetchMs)
+        projMaxPublishMs = max(projMaxPublishMs, publishMs)
+        projItemsMax = max(projItemsMax, itemCount)
+        let now = DispatchTime.now().uptimeNanoseconds
+        guard now - projEmitAt >= 3_000_000_000 else { return }
+        let spanSec = Double(now - projEmitAt) / 1_000_000_000
+        let n = Double(max(projFrames, 1))
+        // busy = 主线程在投影上花掉的时间占比。帧间空闲才是留给 control 应答的时间，
+        // 若 busy 远小于 100% 却仍出现十几秒延迟，则瓶颈不在这里 —— 方案的前提就错了。
+        let payload = String(
+            format: "proj-summary frames=%d fps=%.1f itemsMax=%d fetchAvg=%.2fms fetchMax=%.2fms publishAvg=%.2fms publishMax=%.2fms busy=%.1f%%",
+            projFrames, Double(projFrames) / max(spanSec, 0.001), projItemsMax,
+            projFetchMs / n, projMaxFetchMs, projPublishMs / n, projMaxPublishMs,
+            100 * (projFetchMs + projPublishMs) / 1000 / max(spanSec, 0.001)
+        )
+        projFrames = 0; projFetchMs = 0; projPublishMs = 0
+        projMaxFetchMs = 0; projMaxPublishMs = 0; projItemsMax = 0
+        projEmitAt = now
+        gateway.reportDiagnostic(payload)
     }
     private func publishConversationItems(_ items: [ConversationItem], for sessionId: String) {
         let previouslyHadContent = conversationContentSessionIds.contains(sessionId)
