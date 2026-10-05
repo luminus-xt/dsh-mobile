@@ -1729,7 +1729,10 @@ struct ConversationView: View {
                     // Completed responses are immutable for this revision.
                     // The viewport measures their SwiftUI root directly before
                     // caching, including fenced-code horizontal scroll views.
-                    clipsContentToBounds: true
+                    clipsContentToBounds: true,
+                    // The long-press copy menu needs the source text; a
+                    // MarkdownUI row carries it only inside `content`.
+                    copyableText: item.text
                 )]
             case .process(let group):
                 return processViewportEntries(for: group)

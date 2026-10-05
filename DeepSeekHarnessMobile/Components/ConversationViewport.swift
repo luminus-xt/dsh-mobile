@@ -42,6 +42,10 @@ struct ConversationViewportEntry: Identifiable {
     let userMessage: UserMessage?
     let allowsHeightCaching: Bool
     let clipsContentToBounds: Bool
+    /// Source text of the row, when it has one. MarkdownUI rows are drawn from
+    /// `content: AnyView`, so the text is not otherwise reachable from here —
+    /// the long-press copy menu needs it.
+    let copyableText: String?
 
     fileprivate var cellKind: CellKind {
         if streamingAssistant != nil { return .streamingAssistant }
@@ -54,13 +58,15 @@ struct ConversationViewportEntry: Identifiable {
         revision: Int,
         content: AnyView,
         allowsHeightCaching: Bool = true,
-        clipsContentToBounds: Bool = false
+        clipsContentToBounds: Bool = false,
+        copyableText: String? = nil
     ) {
         self.id = id
         self.revision = revision
         self.content = content
         self.allowsHeightCaching = allowsHeightCaching
         self.clipsContentToBounds = clipsContentToBounds
+        self.copyableText = copyableText
         streamingAssistant = nil
         userMessage = nil
     }
@@ -76,6 +82,7 @@ struct ConversationViewportEntry: Identifiable {
         // preferred-size invalidation while a diffable update is committing.
         allowsHeightCaching = true
         clipsContentToBounds = false
+        copyableText = streamingAssistant.text
     }
 
     init(id: String, revision: Int, userMessage: UserMessage) {
@@ -86,6 +93,7 @@ struct ConversationViewportEntry: Identifiable {
         self.userMessage = userMessage
         allowsHeightCaching = true
         clipsContentToBounds = false
+        copyableText = userMessage.text
     }
 }
 
@@ -414,6 +422,23 @@ final class ConversationViewportController: UIViewController, UICollectionViewDe
         // buttons and expandable process rows still receive their action.
         dismissKeyboardTap.cancelsTouchesInView = false
         collectionView.addGestureRecognizer(dismissKeyboardTap)
+        // Long-press any message to copy its source text.
+        //
+        // The built-in copy button is deliberately narrow: an assistant row only
+        // shows it when it is the last formal response before the next user turn,
+        // so intermediate narration stays visually quiet (matching WebUI's
+        // final-answer action placement). The side effect is that most assistant
+        // messages offer no way to be copied at all.
+        //
+        // A long press covers every row — streaming, user, and the
+        // MarkdownUI-drawn ones — without changing where the button lives, and
+        // it does not compete with scrolling.
+        let messageLongPress = UILongPressGestureRecognizer(
+            target: self,
+            action: #selector(presentMessageCopyMenu(_:))
+        )
+        messageLongPress.cancelsTouchesInView = false
+        collectionView.addGestureRecognizer(messageLongPress)
         collectionView.register(
             HostedConversationCell.self,
             forCellWithReuseIdentifier: "ConversationCell"
@@ -528,6 +553,52 @@ final class ConversationViewportController: UIViewController, UICollectionViewDe
 
     @objc private func dismissKeyboardFromConversation() {
         view.window?.endEditing(true)
+    }
+
+    /// Long-press any message row to copy its source text.
+    ///
+    /// The per-row copy button is intentionally restricted (an assistant row
+    /// only shows it when it is the last formal response before the next user
+    /// turn), which leaves most assistant messages uncopyable. This menu is the
+    /// general path: it works for streaming rows, user rows, and the
+    /// MarkdownUI-drawn rows alike, because the source text travels on the
+    /// entry as `copyableText`.
+    @objc private func presentMessageCopyMenu(_ gesture: UILongPressGestureRecognizer) {
+        guard gesture.state == .began else { return }
+        let point = gesture.location(in: collectionView)
+        guard let indexPath = collectionView.indexPathForItem(at: point) else { return }
+        let id = dataSource?.itemIdentifier(for: indexPath)
+        guard let id, let entry = entriesByID[id] else { return }
+        let text = (entry.copyableText ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return }
+        UIPasteboard.general.string = text
+        presentCopyConfirmation()
+    }
+
+    private func presentCopyConfirmation() {
+        let toast = UILabel()
+        toast.text = String(localized: "已复制", defaultValue: "已复制")
+        toast.font = .preferredFont(forTextStyle: .subheadline)
+        toast.textColor = .white
+        toast.backgroundColor = UIColor.label.withAlphaComponent(0.85)
+        toast.textAlignment = .center
+        toast.layer.cornerRadius = 8
+        toast.layer.masksToBounds = true
+        toast.alpha = 0
+        toast.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(toast)
+        NSLayoutConstraint.activate([
+            toast.centerXAnchor.constraint(equalTo: view.centerXAnchor),
+            toast.centerYAnchor.constraint(equalTo: view.centerYAnchor),
+            toast.heightAnchor.constraint(equalToConstant: 34),
+            toast.widthAnchor.constraint(greaterThanOrEqualToConstant: 88),
+        ])
+        UIView.animate(withDuration: 0.15) { toast.alpha = 1 }
+        UIView.animate(withDuration: 0.25, delay: 1.1, options: []) {
+            toast.alpha = 0
+        } completion: { _ in
+            toast.removeFromSuperview()
+        }
     }
 
     private func presentImagePreview(
@@ -2268,7 +2339,11 @@ final class StreamingAssistantCell: StableSelfSizingCollectionViewCell {
         let view = UITextView()
         view.backgroundColor = .clear
         view.isEditable = false
-        view.isSelectable = false
+        // Selection costs nothing on a read-only text view and gives the
+        // streaming row the system select-and-copy handles for free. The row
+        // still needs its own long press for finished MarkdownUI rows, which
+        // are drawn rather than displayed in a UITextView.
+        view.isSelectable = true
         view.isScrollEnabled = false
         view.textContainerInset = .zero
         view.textContainer.lineFragmentPadding = 0
