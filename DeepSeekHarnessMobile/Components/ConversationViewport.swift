@@ -567,7 +567,7 @@ final class ConversationViewportController: UIViewController, UICollectionViewDe
         guard gesture.state == .began else { return }
         let point = gesture.location(in: collectionView)
         guard let indexPath = collectionView.indexPathForItem(at: point) else { return }
-        let id = collectionView.diffableDataSource?.itemIdentifier(for: indexPath)
+        let id = dataSource?.itemIdentifier(for: indexPath)
         guard let id, let entry = entriesByID[id] else { return }
         let text = (entry.copyableText ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return }
